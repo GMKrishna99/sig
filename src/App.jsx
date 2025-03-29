@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
-import { PDFDocument, rgb } from "pdf-lib";
+import { PDFDocument, rgb, PDFName, PDFWidgetAnnotation } from "pdf-lib";
 import SignaturePad from "signature_pad";
 import { v4 as uuidv4 } from "uuid";
 import "./App.css";
@@ -138,52 +138,72 @@ function App() {
   };
 
   const downloadSignedPdf = async () => {
-    if (!documentFile || signatureFields.length === 0) {
-      alert("Please upload a document and add signatures first");
+    if (!documentFile) {
+      alert("Please upload a PDF document first");
+      return;
+    }
+
+    if (signatureFields.length === 0) {
+      alert("Please add at least one signature field first");
       return;
     }
 
     setIsDownloading(true);
 
     try {
-      // 1. Read the uploaded file
-      const fileArrayBuffer = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsArrayBuffer(documentFile);
-      });
+      // 1. Read the uploaded file as ArrayBuffer
+      const fileArrayBuffer = await documentFile.arrayBuffer();
 
       // 2. Load the PDF
       const pdfDoc = await PDFDocument.load(fileArrayBuffer);
-      const pages = pdfDoc.getPages();
 
-      // 3. Process each signature field
+      // 3. Get the form (if exists) or create an empty one
+      let form = pdfDoc.getForm();
+      if (!form) {
+        form = pdfDoc.createForm();
+      }
+
+      // 4. Process each signature field
       for (const field of signatureFields) {
-        if (field.signatureData && field.pageNumber <= pages.length) {
-          const page = pages[field.pageNumber - 1];
-          const { width, height } = page.getSize();
+        if (field.pageNumber > pdfDoc.getPageCount()) continue;
 
-          // Calculate scale factor (match display scale)
-          const displayWidth = 600; // Same as your Page width prop
-          const scale = displayWidth / width;
+        const page = pdfDoc.getPages()[field.pageNumber - 1];
+        const { width, height } = page.getSize();
+        const displayWidth = 600; // Adjust this based on your UI
+        const scale = displayWidth / width;
 
-          // Convert signature to image
-          const pngImageBytes = await fetch(field.signatureData).then((res) =>
-            res.arrayBuffer()
+        // Convert coordinates to PDF space
+        const pdfX = field.x / scale;
+        const pdfY = height - field.y / scale - field.height / scale;
+        const pdfWidth = field.width / scale;
+        const pdfHeight = field.height / scale;
+
+        // Create a text field (editable)
+        let textField;
+        try {
+          textField = form.getTextField(`Signature_${field.id}`);
+        } catch {
+          textField = form.createTextField(`Signature_${field.id}`);
+        }
+
+        // Add the text field to the form (this keeps it editable)
+        textField.setText("Click here to sign");
+        textField.addToPage(page, {
+          x: pdfX,
+          y: pdfY,
+          width: pdfWidth,
+          height: pdfHeight,
+        });
+
+        // Embed the signature image
+        if (field.signatureData) {
+          const base64String = field.signatureData.split(",")[1];
+          const byteArray = Uint8Array.from(atob(base64String), (c) =>
+            c.charCodeAt(0)
           );
+          const image = await pdfDoc.embedPng(byteArray);
 
-          // Embed the PNG image
-          const pngImage = await pdfDoc.embedPng(pngImageBytes);
-
-          // Calculate PDF coordinates (PDF uses bottom-left origin)
-          const pdfX = field.x / scale;
-          const pdfY = height - field.y / scale - field.height / scale;
-          const pdfWidth = field.width / scale;
-          const pdfHeight = field.height / scale;
-
-          // Draw the signature on the PDF page
-          page.drawImage(pngImage, {
+          page.drawImage(image, {
             x: pdfX,
             y: pdfY,
             width: pdfWidth,
@@ -192,10 +212,8 @@ function App() {
         }
       }
 
-      // 4. Save the modified PDF
+      // 5. Save and download the modified PDF
       const pdfBytes = await pdfDoc.save();
-
-      // 5. Trigger download
       const blob = new Blob([pdfBytes], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -204,14 +222,13 @@ function App() {
       document.body.appendChild(link);
       link.click();
 
-      // Clean up
       setTimeout(() => {
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
       }, 100);
     } catch (error) {
-      console.error("Error generating PDF:", error);
-      alert("Failed to generate signed PDF. Please try again.");
+      console.error("PDF generation failed:", error);
+      alert(`Failed to generate PDF: ${error.message}`);
     } finally {
       setIsDownloading(false);
     }
@@ -301,7 +318,9 @@ function App() {
             onClick={downloadSignedPdf}
             className="tool-btn download-btn"
             disabled={
-              !documentFile || signatureFields.length === 0 || isDownloading
+              !documentFile ||
+              signatureFields.filter((f) => f.signatureData).length === 0 ||
+              isDownloading
             }
           >
             {isDownloading ? "Downloading..." : "Download Signed PDF"}
